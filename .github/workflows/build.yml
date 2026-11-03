@@ -17,11 +17,18 @@
 
 name: Build
 
-on: [push, pull_request]
+on:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Comma-separated guava test classes to run (empty = default patched-path set)'
+        required: false
+        default: ''
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
     - name: Checkout source
       uses: actions/checkout@v2
@@ -32,4 +39,27 @@ jobs:
         distribution: 'adopt'
     - name: Build with Maven
       run: mvn install
+    - name: Test shaded Guava sources (guava's own tests for the shaded version)
+      env:
+        MAVEN_OPTS: -Xmx3g
+      run: |
+        GUAVA_VERSION=$(mvn -q -B help:evaluate -Dexpression=guava.version -DforceStdout -pl hadoop-shaded-guava)
+        GUAVA_TAG="v${GUAVA_VERSION%%-*}"
+        echo "Testing guava ${GUAVA_VERSION} (source tag ${GUAVA_TAG})"
+        git clone --depth 1 -b "${GUAVA_TAG}" https://github.com/google/guava.git "${RUNNER_TEMP}/guava-src"
+        cd "${RUNNER_TEMP}/guava-src"
+        # run guava's tests against the exact guava jar hadoop-shaded-guava shades
+        sed -i "0,/<version>\${project.version}<\/version>/s//<version>${GUAVA_VERSION}<\/version>/" guava-testlib/pom.xml
+        TESTS="CompactHashMapTest,CompactHashSetTest,CompactHashMapFloodingTest,CompactHashSetFloodingTest,MapMakerInternalMapTest"
+        if [ -n "${{ inputs.test-filter }}" ]; then
+          TESTS="${{ inputs.test-filter }}"
+        fi
+        mvn -B dependency:tree -pl guava-testlib -Dincludes=com.google.guava:guava
+        mvn -B test -pl guava-testlib,guava-tests -Dtest="${TESTS}" -DfailIfNoTests=false -Dsurefire.failIfNoSpecifiedTests=false -Danimal.sniffer.skip=true
+    - name: Upload hadoop-shaded-guava jar
+      uses: actions/upload-artifact@v4
+      with:
+        name: hadoop-shaded-guava
+        path: hadoop-shaded-guava/target/hadoop-shaded-guava-*.jar
+        if-no-files-found: error
 
